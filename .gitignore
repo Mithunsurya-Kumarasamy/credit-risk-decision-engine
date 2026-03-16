@@ -1,0 +1,11 @@
+# Data and Models
+data/
+models/
+*.pkl
+*.zip
+*.csv
+
+# Python Cache
+__pycache__/
+.ipynb_checkpoints/
+.DS_Store
