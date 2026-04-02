@@ -9,10 +9,12 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import streamlit as st
 import plotly.graph_objects as go
+import datetime
+from fpdf import FPDF
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title  = "LoanGuard AI",
+    page_title  = "LoanGuard",
     page_icon   = "🏦",
     layout      = "wide",
     initial_sidebar_state = "expanded",
@@ -114,8 +116,70 @@ def build_input_row():
 
     return pd.DataFrame([base])[FEATURE_NAMES]
 
+
+# ── PDF Report Generator ──────────────────────────────────────────────────────
+def create_pdf_report(proba, decision, threshold, input_df, expected_loss, expected_profit=None):
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", size=12)
+    
+    status = "REJECTED" if decision else "APPROVED"
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    loan = input_df['loan_amnt'].values[0]
+    income = input_df['annual_inc'].values[0]
+    fico = input_df['fico_avg'].values[0]
+    dti = input_df['dti'].values[0]
+    
+    # 1. Title Header
+    pdf.set_font("Arial", 'B', 16)
+    pdf.cell(200, 10, txt="LOANGUARD AI - DECISION AUDIT REPORT", ln=1, align='C')
+    pdf.line(10, 20, 200, 20)
+    pdf.ln(10)
+    
+    # 2. Metadata
+    pdf.set_font("Arial", size=11)
+    pdf.cell(200, 8, txt=f"Date Generated: {timestamp}", ln=1)
+    pdf.cell(200, 8, txt=f"Applicant ID: #{(hash(timestamp) % 100000):05d} (Auto-generated)", ln=1)
+    pdf.ln(5)
+    
+    # 3. Decision Summary
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(200, 8, txt="--- DECISION SUMMARY ---", ln=1)
+    pdf.set_font("Arial", size=11)
+    pdf.cell(200, 8, txt=f"Final Decision: {status}", ln=1)
+    pdf.cell(200, 8, txt=f"Default Risk Score: {proba:.1%}", ln=1)
+    pdf.cell(200, 8, txt=f"Bank Threshold: {threshold:.1%}", ln=1)
+    pdf.cell(200, 8, txt=f"Variance: {(proba - threshold)*100:+.1f} points", ln=1)
+    pdf.ln(5)
+    
+    # 4. Applicant Metrics
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(200, 8, txt="--- KEY APPLICANT METRICS ---", ln=1)
+    pdf.set_font("Arial", size=11)
+    pdf.cell(200, 8, txt=f"Requested Loan: ${loan:,.2f}", ln=1)
+    pdf.cell(200, 8, txt=f"Annual Income: ${income:,.2f}", ln=1)
+    pdf.cell(200, 8, txt=f"FICO Score: {fico:.0f}", ln=1)
+    pdf.cell(200, 8, txt=f"Debt-to-Income: {dti:.1f}%", ln=1)
+    pdf.ln(5)
+    
+    # 5. Risk Economics
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(200, 8, txt="--- RISK ECONOMICS ---", ln=1)
+    pdf.set_font("Arial", size=11)
+    pdf.cell(200, 8, txt=f"Expected Loss Rate: ${expected_loss:,.2f}", ln=1)
+    if expected_profit:
+        pdf.cell(200, 8, txt=f"Expected Net Profit: ${expected_profit:,.2f}", ln=1)
+        
+    # 6. Footer
+    pdf.ln(15)
+    pdf.set_font("Arial", 'I', 10)
+    pdf.cell(200, 10, txt="Confidential - For Internal Bank Audit Purposes Only", ln=1, align='C')
+    
+    return pdf.output(dest='S').encode('latin-1')
+
+
 # ── Main Panel ────────────────────────────────────────────────────────────────
-st.title("🏦 LoanGuard AI — Credit Risk Dashboard")
+st.title("LoanGuard AI — Credit Risk Dashboard")
 st.caption(f"XGBoost model · ROC-AUC {metrics['roc_auc']} · "
            f"PR-AUC {metrics['pr_auc']} · "
            f"Threshold {THRESHOLD:.2%}")
@@ -135,7 +199,7 @@ if run:
     st.divider()
 
     if decision:
-        st.error("## ❌  LOAN APPLICATION REJECTED", icon="🚨")
+        st.error("## LOAN APPLICATION REJECTED")
         st.markdown(f"""
         > **Default Probability: `{proba:.1%}`** — exceeds the risk threshold of `{THRESHOLD:.1%}`
 
@@ -146,7 +210,7 @@ if run:
         """)
 
     else:
-        st.success("## ✅  LOAN APPLICATION APPROVED", icon="✅")
+        st.success("## LOAN APPLICATION APPROVED")
 
         monthly_rate = int_rate / 1200
         monthly_pay  = loan_amnt * monthly_rate / (1 - (1 + monthly_rate) ** -term)
@@ -177,22 +241,35 @@ if run:
     m3.metric("Risk Score",           f"{proba * 100:.1f} / 100")
     m4.metric("Loan-to-Income Ratio", f"{loan_amnt/annual_inc:.2f}")
 
+    # ── Downloadable Audit Report (PDF) ───────────────────────────────────────
+    st.write("") 
+    
+    profit_val = expected_profit if not decision else None
+    loss_val = proba * loan_amnt * 0.6 
+    
+    pdf_bytes = create_pdf_report(proba, decision, THRESHOLD, input_df, loss_val, profit_val)
+    
+    st.download_button(
+        label="📄 Download Official Audit Report (PDF)",
+        data=pdf_bytes,
+        file_name="LoanGuard_Audit_Report.pdf",
+        mime="application/pdf", 
+        type="secondary",
+        use_container_width=True
+    )
+
     # ── SHAP Explanation (Expander Controlled to prevent vanishing app) ───────
-# ── SHAP Explanation (Expander Controlled to prevent vanishing app) ───────
     st.divider()
     
     with st.expander("🔎 Explain Decision (SHAP Waterfall)"):
         st.caption("SHAP waterfall — positive values push towards default, negative values push towards approval.")
         shap_vals = explainer(build_input_row())
         
-        # FIX 1: Slightly reduce the raw figure size (from 10,6 down to 8,5)
         fig, ax = plt.subplots(figsize=(8, 5))
         
-        # (Optional) Drop max_display to 12 so the chart isn't too tall vertically
         shap.plots.waterfall(shap_vals[0], max_display=12, show=False) 
         plt.tight_layout()
         
-        # FIX 2: Box the chart into a middle column so it doesn't stretch 
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
             st.pyplot(fig)
@@ -239,7 +316,7 @@ if run:
         fig_gauge.update_layout(
             paper_bgcolor='#171614',
             height=260,
-            margin=dict(l=10, r=10, t=7, b=0)
+            margin=dict(l=0, r=20, t=20, b=20)
         )
 
         st.plotly_chart(fig_gauge, width="stretch")
@@ -389,12 +466,11 @@ if run:
 
 else:
     # Placeholder state
-    st.info("👈 Adjust applicant details in the sidebar, then click **⚡ Score Applicant**.", icon="ℹ️")
+    st.info("👈 Adjust applicant details in the sidebar, then click **⚡ Score Applicant**.")
     
     st.write("") 
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
-        # Note: st.image uses use_container_width=True, the 'width="stretch"' warning is just for buttons and charts!
         st.image("outputs/shap_summary.png",
                  caption="Feature importance across the full training set",
                  use_container_width=True)
